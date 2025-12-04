@@ -120,79 +120,81 @@ def fetch_most_active(count: int = 25) -> list[dict]:
     return unique[:count]
 
 
+def _dedupe(rows: list[dict], limit: int) -> list[dict]:
+    seen = set()
+    unique = []
+    for row in rows:
+        sym = row["symbol"]
+        if sym in seen:
+            continue
+        seen.add(sym)
+        unique.append(row)
+        if len(unique) >= limit:
+            break
+    return unique
+
+
+def _search_primary(query: str, limit: int, headers: dict) -> list[dict]:
+    params = {"q": query, "quotesCount": limit, "newsCount": 0, "listsCount": 0}
+    resp = requests.get(f"{YAHOO_SEARCH_URL}?{urlencode(params)}", headers=headers, timeout=6)
+    resp.raise_for_status()
+    data = resp.json()
+    rows = []
+    for item in data.get("quotes", []):
+        quote_type = (item.get("quoteType") or "").lower()
+        if quote_type and quote_type not in {"equity", "etf", "mutualfund"}:
+            continue
+        rows.append(
+            {
+                "symbol": item.get("symbol"),
+                "name": item.get("longname") or item.get("shortname") or item.get("symbol"),
+            }
+        )
+    return rows
+
+
+def _search_autoc(query: str, headers: dict) -> list[dict]:
+    params = {"query": query, "region": "1", "lang": "en"}
+    resp = requests.get(f"{YAHOO_AUTOC_URL}?{urlencode(params)}", headers=headers, timeout=6)
+    resp.raise_for_status()
+    data = resp.json() or {}
+    rows = []
+    for item in data.get("ResultSet", {}).get("Result", []):
+        quote_type = (item.get("typeDisp") or "").lower()
+        if quote_type and quote_type not in {"equity", "etf", "fund", "mutualfund"}:
+            continue
+        rows.append({"symbol": item.get("symbol"), "name": item.get("name")})
+    return rows
+
+
 def search_symbols(query: str, limit: int = 15) -> list[dict]:
     """Search Yahoo Finance for symbols matching the query with a local and autoc fallback."""
     query = query.strip()
     if not query:
         return []
 
-    def add_results(rows: list[dict], dest: list[dict]):
-        for row in rows:
-            symbol = row.get("symbol")
-            name = row.get("name") or symbol
-            if not symbol:
-                continue
-            dest.append({"symbol": symbol.upper(), "name": name})
-
     headers = {"User-Agent": "Mozilla/5.0 (stock-viewer)"}
-    results: list[dict] = []
+    collected: list[dict] = []
 
-    # Primary search endpoint
     try:
-        params = {"q": query, "quotesCount": limit, "newsCount": 0, "listsCount": 0}
-        resp = requests.get(f"{YAHOO_SEARCH_URL}?{urlencode(params)}", headers=headers, timeout=6)
-        if resp.ok:
-            data = resp.json()
-            rows = []
-            for item in data.get("quotes", []):
-                quote_type = (item.get("quoteType") or "").lower()
-                if quote_type and quote_type not in {"equity", "etf", "mutualfund"}:
-                    continue
-                rows.append(
-                    {
-                        "symbol": item.get("symbol"),
-                        "name": item.get("longname") or item.get("shortname") or item.get("symbol"),
-                    }
-                )
-            add_results(rows, results)
+        collected.extend(_search_primary(query, limit, headers))
     except Exception:
-        pass
+        collected = []
 
-    # Fallback to autocomplete endpoint if primary failed or gave nothing.
-    if not results:
+    if not collected:
         try:
-            params = {"query": query, "region": "1", "lang": "en"}
-            resp = requests.get(f"{YAHOO_AUTOC_URL}?{urlencode(params)}", headers=headers, timeout=6)
-            if resp.ok:
-                data = resp.json() or {}
-                rows = []
-                for item in data.get("ResultSet", {}).get("Result", []):
-                    quote_type = (item.get("typeDisp") or "").lower()
-                    if quote_type and quote_type not in {"equity", "etf", "fund", "mutualfund"}:
-                        continue
-                    rows.append({"symbol": item.get("symbol"), "name": item.get("name")})
-                add_results(rows, results)
+            collected.extend(_search_autoc(query, headers))
         except Exception:
-            pass
+            collected = []
 
-    # Local fallback suggestions so autocomplete still works when Yahoo is unavailable.
-    if not results:
+    if not collected:
         if SYMBOL_PATTERN.match(query):
-            results.append({"symbol": query.upper(), "name": query.upper()})
+            collected.append({"symbol": query.upper(), "name": query.upper()})
         fuzzy = get_close_matches(query.lower(), STOCK_MAP.keys(), n=5, cutoff=0.4)
         for name in fuzzy:
-            results.append({"symbol": STOCK_MAP[name], "name": name.title()})
+            collected.append({"symbol": STOCK_MAP[name], "name": name.title()})
 
-    # De-duplicate while preserving order.
-    seen = set()
-    unique = []
-    for row in results:
-        sym = row["symbol"]
-        if sym in seen:
-            continue
-        seen.add(sym)
-        unique.append(row)
-    return unique[:limit]
+    return _dedupe(collected, limit)
 
 
 def get_stock_info(ticker: str) -> dict:
@@ -296,7 +298,7 @@ def _cache_model(ticker: str, model: Sequential, scaler: MinMaxScaler):
     MODEL_CACHE[ticker] = (model, scaler)
     MODEL_CACHE.move_to_end(ticker)
     while len(MODEL_CACHE) > MAX_MODEL_CACHE:
-        old_ticker, (old_model, _) = MODEL_CACHE.popitem(last=False)
+        _, (old_model, _) = MODEL_CACHE.popitem(last=False)
         try:
             old_model.reset_states()
         except Exception:

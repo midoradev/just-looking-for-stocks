@@ -1,7 +1,12 @@
 # Just looking for stocks
-A website + notebook for stocks
+A website for stocks
 
-## Run (CPU default)
+## Overview
+- Flask API + simple frontend (Chart.js) for stock info, history, and LSTM-based close-price predictions.
+- Data via Yahoo Finance (yfinance and direct search/screener endpoints).
+- Models are cached per ticker under `models/` (gitignored); trained on-demand with a lightweight LSTM.
+
+## Quickstart (CPU)
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -25,3 +30,32 @@ python -m stock_app.app   # serves on http://127.0.0.1:5000 (set PORT to overrid
 source .venv-metal/bin/activate  # created with python3.11 -m venv .venv-metal
 python -m stock_app.app
 ```
+
+## Usage (UI)
+- Open `http://127.0.0.1:5000` (or your configured PORT).
+- Search bar supports tickers/company names; quick-picks show most active symbols.
+- Range tabs: intraday (1d/1w) and longer windows; interval dropdown lets you force granularity.
+- Charts: zoom/pan (wheel/pinch; drag to pan; Shift+drag to box-zoom), crosshair shows date/price.
+- Tables default to summary; “Show all” toggles full data.
+
+## API (informal)
+- `/api/info?ticker=TSM`
+- `/api/history?ticker=TSM&range=1m&interval=auto` (range supports 1d,1w,1m,3m,6m,ytd,1y,2y,5y,10y,all; interval optional)
+- `/api/predict?ticker=TSM`
+- `/api/search?q=apple`
+- `/api/symbols` (most active + fallback list)
+
+## Development notes
+- Models dir: created automatically (`models/`, gitignored). On first predict per ticker, an LSTM is trained and cached (tiny LRU to control memory).
+- Search: uses Yahoo Finance search, autocomplete fallback, then local map.
+- History: picks sensible defaults per range; interval override allowed (short intervals only for <6m).
+- Frontend: plain HTML/JS; Chart.js + chartjs-plugin-zoom.
+
+## Contributing
+- Prefer PRs with small, focused changes.
+- Keep dependencies minimal; pin GPU/Metal deps in `requirements-metal.txt` only.
+- Tests: none included; if adding, document how to run.
+- Coding style: Python 3.11+, Flask; avoid breaking API params. Frontend in vanilla JS; keep UI concise.
+
+## Code ownership
+- No CODEOWNERS file yet; if you add one, include maintainers who review API, model, and UI changes separately. For now, please tag maintainers in PR descriptions.

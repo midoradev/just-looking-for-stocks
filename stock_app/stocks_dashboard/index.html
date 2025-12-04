@@ -16,6 +16,15 @@
       --accent: #0052cc;
       --danger: #c62828;
     }
+    :root.dark {
+      --bg: #0f172a;
+      --panel: #111827;
+      --border: #1f2937;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --danger: #f87171;
+    }
     * { box-sizing: border-box; }
     body {
       margin: 0;
@@ -88,7 +97,7 @@
     th { background: #f1f4fa; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
     .error { color: var(--danger); margin-top: 6px; font-size: 14px; }
-    .chart-area { background: #fff; border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-top: 10px; }
+    .chart-area { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-top: 10px; }
     canvas { width: 100% !important; height: 320px !important; cursor: grab; }
     .chart-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
     .hint { font-size: 12px; color: var(--muted); }
@@ -107,7 +116,10 @@
   <div class="page">
     <header>
       <div class="title">Just looking for stocks</div>
-      <div class="muted">Simple tables, fresh data each reload.</div>
+      <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+        <div class="muted">Simple tables, fresh data each reload.</div>
+        <button id="themeToggle" class="ghost-btn" type="button">Toggle theme</button>
+      </div>
     </header>
 
     <div class="panel">
@@ -224,7 +236,7 @@
     </div>
   </div>
 
-  <script>
+  <script type="module">
     const state = {
       ticker: "AAPL",
       range: "1m",
@@ -233,9 +245,10 @@
       showFullPred: false,
       historyData: [],
       validationData: [],
+      theme: "light",
     };
-    if (window.ChartZoom) {
-      Chart.register(window.ChartZoom);
+    if (globalThis.ChartZoom) {
+      Chart.register(globalThis.ChartZoom);
     }
     const crosshairPlugin = {
       id: "crosshair",
@@ -327,10 +340,13 @@
     const intervalSelect = document.getElementById("intervalSelect");
     const toggleHistoryRowsBtn = document.getElementById("toggleHistoryRows");
     const togglePredRowsBtn = document.getElementById("togglePredRows");
+    const themeToggle = document.getElementById("themeToggle");
     rangeTabs.addEventListener("click", (e) => {
       const btn = e.target.closest(".range-btn");
       if (!btn) return;
-      document.querySelectorAll(".range-btn").forEach((b) => b.classList.remove("active"));
+      for (const b of document.querySelectorAll(".range-btn")) {
+        b.classList.remove("active");
+      }
       btn.classList.add("active");
       state.range = btn.dataset.range;
       loadHistory(activeLoadToken, state.ticker, state.range, state.interval);
@@ -349,6 +365,16 @@
     togglePredRowsBtn.addEventListener("click", () => {
       state.showFullPred = !state.showFullPred;
       renderPredTable(state.validationData);
+    });
+
+    function applyTheme(theme) {
+      document.documentElement.classList.toggle("dark", theme === "dark");
+      themeToggle.textContent = theme === "dark" ? "Switch to light" : "Switch to dark";
+    }
+
+    themeToggle.addEventListener("click", () => {
+      state.theme = state.theme === "dark" ? "light" : "dark";
+      applyTheme(state.theme);
     });
     document.getElementById("searchForm").addEventListener("submit", (e) => {
       e.preventDefault();
@@ -442,15 +468,16 @@
         lastY = e.clientY;
         try {
           canvas.setPointerCapture(e.pointerId);
-        } catch (_) {}
+        } catch (error_) {
+          console.error(error_);
+        }
         setCursor(canvas, "grabbing");
       };
       const move = (e) => {
-        if (!isPanning) return;
+        if (isPanning === false) return;
         e.preventDefault();
         const dx = e.clientX - lastX;
         const dy = e.clientY - lastY;
-        // Dragging right should move the chart view left (invert direction).
         pending.x += dx;
         pending.y += dy;
         lastX = e.clientX;
@@ -458,13 +485,15 @@
         if (!raf) raf = requestAnimationFrame(flushPan);
       };
       const up = (e) => {
-        if (!isPanning) return;
+        if (isPanning === false) return;
         isPanning = false;
         pending = { x: 0, y: 0 };
         setCursor(canvas, "grab");
         try {
           canvas.releasePointerCapture(e.pointerId);
-        } catch (_) {}
+        } catch (error_) {
+          console.error(error_);
+        }
       };
       canvas.addEventListener("pointerdown", down);
       canvas.addEventListener("pointermove", move);
@@ -475,12 +504,12 @@
 
     function setError(msg) {
       const el = document.getElementById("error");
-      if (!msg) {
-        el.style.display = "none";
-        el.textContent = "";
-      } else {
+      if (msg) {
         el.style.display = "block";
         el.textContent = msg;
+      } else {
+        el.style.display = "none";
+        el.textContent = "";
       }
     }
 
@@ -502,11 +531,11 @@
       const tbody = document.querySelector("#historyTable tbody");
       tbody.innerHTML = "";
       const rows = state.showFullHistory ? data : data.slice(-10);
-      rows.forEach((p) => {
+      for (const p of rows) {
         const tr = document.createElement("tr");
         tr.innerHTML = `<td>${p.Date}</td><td>${p.Open}</td><td>${p.High}</td><td>${p.Low}</td><td>${p.Close}</td><td>${p.Volume}</td>`;
         tbody.appendChild(tr);
-      });
+      }
       const meta = document.getElementById("historyRowsMeta");
       const btn = document.getElementById("toggleHistoryRows");
       meta.textContent = state.showFullHistory ? `Showing all ${data.length}` : `Showing latest ${rows.length} of ${data.length}`;
@@ -527,7 +556,12 @@
       const prices = data.prices || [];
       state.historyData = prices;
       renderHistoryTable(prices);
-      const intervalLabel = data.interval ? data.interval : interval === "auto" ? "auto" : interval || "auto";
+      let intervalLabel = "auto";
+      if (data.interval) {
+        intervalLabel = data.interval;
+      } else if (interval && interval !== "auto") {
+        intervalLabel = interval;
+      }
       document.getElementById("priceMeta").textContent = `${data.symbol} • ${range.toUpperCase()} • ${intervalLabel} • ${prices.length} rows`;
 
       // Build price chart (close)
@@ -578,11 +612,11 @@
       tbody.innerHTML = "";
       const tableRows = [...validation].sort((a, b) => new Date(b.Date) - new Date(a.Date));
       const rows = state.showFullPred ? tableRows : tableRows.slice(0, 10);
-      rows.forEach((row) => {
+      for (const row of rows) {
         const tr = document.createElement("tr");
         tr.innerHTML = `<td>${row.Date}</td><td>${formatUSD(row.Close)}</td><td>${formatUSD(row.Prediction)}</td>`;
         tbody.appendChild(tr);
-      });
+      }
       const meta = document.getElementById("predRowsMeta");
       const btn = document.getElementById("togglePredRows");
       meta.textContent = state.showFullPred ? `Showing all ${tableRows.length}` : `Showing latest ${rows.length} of ${tableRows.length}`;
@@ -656,12 +690,12 @@
     function renderOptions(list) {
       const dl = document.getElementById("symbolList");
       dl.innerHTML = "";
-      list.forEach(({ symbol, name }) => {
+      for (const { symbol, name } of list) {
         const opt = document.createElement("option");
         opt.value = symbol;
         opt.label = name;
         dl.appendChild(opt);
-      });
+      }
     }
 
     async function loadQuickPicks() {
@@ -671,7 +705,7 @@
         renderOptions(list);
         const qp = document.getElementById("quickPicks");
         qp.innerHTML = "";
-        list.forEach(({ symbol, name }) => {
+        for (const { symbol, name } of list) {
           const chip = document.createElement("div");
           chip.className = "chip";
           chip.innerHTML = `<span>${symbol}</span><span class="muted">${name}</span>`;
@@ -681,9 +715,10 @@
             loadAll();
           };
           qp.appendChild(chip);
-        });
+        }
       } catch (err) {
         console.error(err);
+        setError("Unable to load symbols right now.");
       }
     }
 
@@ -695,6 +730,7 @@
         renderOptions(results);
       } catch (err) {
         console.error(err);
+        setError("Search unavailable right now.");
       }
     }
 
@@ -732,8 +768,13 @@
       }
     }
 
-    tickerInput.value = state.ticker;
-    loadQuickPicks().then(loadAll);
+    async function bootstrap() {
+      tickerInput.value = state.ticker;
+      applyTheme(state.theme);
+      await loadQuickPicks();
+      await loadAll();
+    }
+    await bootstrap();
   </script>
 </body>
 </html>
