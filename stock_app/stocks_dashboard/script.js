@@ -16,8 +16,8 @@ const crosshairPlugin = {
   afterDatasetsDraw(chart) {
     const enabled = chart.options?.plugins?.crosshair?.enabled;
     if (!enabled) return;
-    const active = chart.getActiveElements();
-    if (!active || !active.length) return;
+    const active = chart.getActiveElements?.();
+    if (!active?.length) return;
     const { ctx, chartArea } = chart;
     const { left, right, top, bottom } = chartArea;
     const { element } = active[0];
@@ -216,7 +216,7 @@ function attachPanHandlers(chart, canvas) {
   let raf = null;
   const flushPan = () => {
     raf = null;
-    if (isPanning === false) return;
+    if (isPanning) return;
     chart.pan(pending, undefined, "none");
     pending = { x: 0, y: 0 };
   };
@@ -265,12 +265,12 @@ function attachPanHandlers(chart, canvas) {
 
 function setError(msg) {
   const el = document.getElementById("error");
-  if (!msg) {
-    el.style.display = "none";
-    el.textContent = "";
-  } else {
+  if (msg) {
     el.style.display = "block";
     el.textContent = msg;
+  } else {
+    el.style.display = "none";
+    el.textContent = "";
   }
 }
 
