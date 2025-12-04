@@ -1,0 +1,11 @@
+pandas
+numpy
+matplotlib
+seaborn
+yfinance
+scikit-learn
+tensorflow
+keras
+Flask
+Flask-Cors
+requests
