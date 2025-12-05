@@ -460,25 +460,29 @@ def _compute_train_len(length: int, lookback: int) -> int:
 
 
 def predict_prices(ticker: str, days: int, range_key: str | None = None, interval: str | None = None) -> dict:
-    # Try requested window/interval first; fall back to full daily history if not enough data.
+    # Try requested window/interval first; fall back to full daily history only if nothing returns.
     try:
         df, eff_interval = get_history(ticker, days, range_key=range_key, interval=interval)
     except Exception:
         df, eff_interval = _get_full_history(ticker).reset_index(), "1d"
-    else:
-        if len(df) < MIN_PRED_POINTS:
-            try:
-                df_full = _get_full_history(ticker).reset_index()
-                if len(df_full) > len(df):
-                    df, eff_interval = df_full, "1d"
-            except Exception:
-                pass
 
     dates = _format_date_column(df, eff_interval).reset_index(drop=True)
     close_series = df["Close"].reset_index(drop=True)
     dataset = close_series.values.astype(np.float32).reshape(-1, 1)
+    using_full_for_training = False
     if len(dataset) < MIN_PRED_POINTS:
-        raise ValueError("Not enough historical data to build a prediction window yet.")
+        # Train on full history, but return predictions sliced to the requested window.
+        df_full = _get_full_history(ticker).reset_index()
+        dates_full = _format_date_column(df_full, "1d").reset_index(drop=True)
+        close_series_full = df_full["Close"].reset_index(drop=True)
+        dataset_full = close_series_full.values.astype(np.float32).reshape(-1, 1)
+        if len(dataset_full) < MIN_PRED_POINTS:
+            raise ValueError("Not enough historical data to build a prediction window yet.")
+        dates = dates_full
+        close_series = close_series_full
+        dataset = dataset_full
+        eff_interval = "1d"
+        using_full_for_training = True
 
     lookback = _choose_lookback(len(dataset))
     training_data_len = _compute_train_len(len(dataset), lookback)
@@ -486,32 +490,43 @@ def predict_prices(ticker: str, days: int, range_key: str | None = None, interva
     model, scaler = load_or_train_model(ticker, dataset, lookback)
 
     scaled_data = scaler.transform(dataset).astype(np.float32)
-    test_data = scaled_data[training_data_len - lookback :, :]
 
-    x_test, y_test = [], dataset[training_data_len:, :]
-    for i in range(lookback, len(test_data)):
-        x_test.append(test_data[i - lookback : i, 0])
-    x_test = np.array(x_test, dtype=np.float32)
-    if x_test.size == 0:
+    # Predict across the whole window (minus the initial lookback) so charts stay aligned to the selected range.
+    preds_full = []
+    for i in range(lookback, len(dataset)):
+        window = scaled_data[i - lookback : i, :]
+        window = np.reshape(window, (1, lookback, 1)).astype(np.float32)
+        pred = model.predict(window, verbose=0)
+        preds_full.append(pred[0, 0])
+    if not preds_full:
         raise ValueError("Not enough data to build a prediction window.")
-    x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
+    preds_full = np.array(preds_full).reshape(-1, 1)
+    preds_full = scaler.inverse_transform(preds_full)[:, 0]
 
-    predictions = model.predict(x_test, verbose=0)
-    predictions = scaler.inverse_transform(predictions)
-
-    rmse = float(np.sqrt(np.mean((predictions - y_test) ** 2)))
+    # RMSE on validation portion only.
+    val_start = max(training_data_len, lookback)
+    y_true = close_series.iloc[val_start:].to_numpy()
+    y_hat = preds_full[(val_start - lookback) :]
+    rmse = float(np.sqrt(np.mean((y_hat - y_true) ** 2))) if len(y_true) and len(y_hat) else 0.0
 
     valid = pd.DataFrame(
         {
-            "Date": dates.iloc[training_data_len:].reset_index(drop=True),
-            "Close": close_series.iloc[training_data_len:].reset_index(drop=True),
+            "Date": dates.iloc[lookback:].reset_index(drop=True),
+            "Close": close_series.iloc[lookback:].reset_index(drop=True),
+            "Prediction": preds_full,
         }
     )
-    valid["Prediction"] = predictions[:, 0]
+
+    if using_full_for_training and len(df) > 0:
+        # Slice predictions to requested window length so charts stay in sync with the selected range.
+        tail_len = len(df)
+        if tail_len > len(valid):
+            tail_len = len(valid)
+        valid = valid.tail(tail_len).reset_index(drop=True)
 
     return {
         "rmse": rmse,
-        "predicted_next_close": float(predictions[-1, 0]),
-        "validation": valid[["Date", "Close", "Prediction"]].to_dict(orient="records"),
+        "predicted_next_close": float(preds_full[-1]),
+        "validation": valid.to_dict(orient="records"),
         "interval": eff_interval,
     }

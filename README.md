@@ -56,6 +56,7 @@ python -m stock_app.app
 - Training: prediction runs a short training loop (few epochs) with a small validation split and early stopping to stabilize forecasts.
 - UI resilience: info/history/prediction load independently; one API hiccup won’t blank the page.
 - Hosting (prod): run behind a WSGI server, e.g. `gunicorn "stock_app.app:app"` (Linux/macOS) or `waitress-serve --port=5000 stock_app.app:app` (Windows-friendly). Put nginx/HTTPS in front, set `PORT` if needed, and add simple rate limiting to avoid Yahoo throttling.
+- Predictions are experimental and not investment advice; treat outputs as a guide, not ground truth.
 
 ## Contributing
 - Prefer PRs with small, focused changes.

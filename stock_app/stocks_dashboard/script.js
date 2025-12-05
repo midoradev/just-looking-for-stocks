@@ -140,6 +140,8 @@ function applyTheme(theme) {
 themeToggle.addEventListener("click", () => {
   state.theme = state.theme === "dark" ? "light" : "dark";
   applyTheme(state.theme);
+  // Rebuild charts/tables so chart styling matches the active theme.
+  loadAll();
 });
 document.getElementById("searchForm").addEventListener("submit", (e) => {
   e.preventDefault();

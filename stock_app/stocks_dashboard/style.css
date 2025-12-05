@@ -16,7 +16,8 @@
   --panel-muted: #1f2937;
   --chart-bg: #111827;
   --border: #1f2937;
-  --grid: #2d3748;
+  /* Pinned grid line color for dark mode */
+  --grid: #363f44;
   --text: #e5e7eb;
   --muted: #94a3b8;
   --accent: #38bdf8;
@@ -45,6 +46,7 @@ header {
 }
 .title { font-size: 22px; font-weight: 700; }
 .muted { color: var(--muted); font-size: 13px; }
+.caution { font-style: italic; }
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
