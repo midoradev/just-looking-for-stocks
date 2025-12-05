@@ -16,22 +16,26 @@ const crosshairPlugin = {
   afterDatasetsDraw(chart) {
     const enabled = chart.options?.plugins?.crosshair?.enabled;
     if (!enabled) return;
-    const active = chart.getActiveElements?.();
-    if (!active?.length) return;
-    const { ctx, chartArea } = chart;
-    const { left, right, top, bottom } = chartArea;
-    const { element } = active[0];
-    const x = element.x;
-    const y = element.y;
+  const active = chart.getActiveElements?.();
+  if (!active?.length) return;
+  const { ctx, chartArea } = chart;
+  const { left, right, top, bottom } = chartArea;
+  const { element } = active[0];
+  const x = element.x;
+  const y = element.y;
     const { datasetIndex, index } = active[0];
     const ds = chart.data.datasets?.[datasetIndex];
     const val = ds?.data?.[index];
     const price = typeof val === "object" && val !== null ? val.y ?? val : val;
-    const label = chart.data.labels?.[index];
+  const label = chart.data.labels?.[index];
+  const styles = getComputedStyle(document.documentElement);
+  const textColor = styles.getPropertyValue("--text").trim() || "#1b2333";
+  const panelColor = styles.getPropertyValue("--panel").trim() || "#ffffff";
+  const borderColor = styles.getPropertyValue("--border").trim() || "#d7deea";
     ctx.save();
     ctx.setLineDash([4, 4]);
     ctx.lineWidth = 1;
-    ctx.strokeStyle = "#94a3b8";
+    ctx.strokeStyle = borderColor || "#94a3b8";
     ctx.beginPath();
     ctx.moveTo(x, top);
     ctx.lineTo(x, bottom);
@@ -48,8 +52,8 @@ const crosshairPlugin = {
       const width = ctx.measureText(labelText).width + padding * 2;
       const lx = Math.min(Math.max(x - width / 2, left + 2), right - width - 2);
       const ly = top + 4;
-      ctx.fillStyle = "#0f172a";
-      ctx.strokeStyle = "#e2e8f0";
+      ctx.fillStyle = panelColor || "#f8fafc";
+      ctx.strokeStyle = borderColor || "#e2e8f0";
       ctx.lineWidth = 1;
       ctx.beginPath();
       if (typeof ctx.roundRect === "function") {
@@ -57,10 +61,10 @@ const crosshairPlugin = {
       } else {
         ctx.rect(lx, ly, width, height);
       }
-      ctx.fillStyle = "#f8fafc";
+      ctx.fillStyle = panelColor || "#f8fafc";
       ctx.fill();
       ctx.stroke();
-      ctx.fillStyle = "#0f172a";
+      ctx.fillStyle = textColor;
       ctx.fillText(labelText, lx + padding, ly + height - 6);
     }
     if (price !== undefined) {
@@ -71,8 +75,8 @@ const crosshairPlugin = {
       const width = ctx.measureText(txt).width + padding * 2;
       const rx = right - width - 6;
       const ry = y - height / 2;
-      ctx.fillStyle = "#0f172a";
-      ctx.strokeStyle = "#e2e8f0";
+      ctx.fillStyle = panelColor || "#f8fafc";
+      ctx.strokeStyle = borderColor || "#e2e8f0";
       ctx.lineWidth = 1;
       ctx.beginPath();
       if (typeof ctx.roundRect === "function") {
@@ -80,10 +84,10 @@ const crosshairPlugin = {
       } else {
         ctx.rect(rx, ry, width, height);
       }
-      ctx.fillStyle = "#f8fafc";
+      ctx.fillStyle = panelColor || "#f8fafc";
       ctx.fill();
       ctx.stroke();
-      ctx.fillStyle = "#0f172a";
+      ctx.fillStyle = textColor;
       ctx.fillText(txt, rx + padding, ry + height - 6);
     }
     ctx.restore();
@@ -177,7 +181,12 @@ function setCursor(el, cursor) {
 }
 
 function zoomOptions(canvas) {
+  const styles = getComputedStyle(document.documentElement);
+  const textColor = styles.getPropertyValue("--text").trim() || "#1b2333";
+  const borderColor = styles.getPropertyValue("--border").trim() || "#d7deea";
   return {
+    textColor,
+    borderColor,
     pan: { enabled: true, mode: "xy", threshold: 0 },
     zoom: {
       wheel: { enabled: true, speed: 0.05, modifierKey: null },
@@ -196,6 +205,17 @@ function zoomOptions(canvas) {
       x: { min: "original", max: "original" },
       y: { min: "original", max: "original" },
     },
+    scales: {
+      x: {
+        ticks: { color: textColor, maxRotation: 0 },
+        grid: { color: borderColor },
+      },
+      y: {
+        ticks: { color: textColor },
+        grid: { color: borderColor },
+      },
+    },
+    legendColor: textColor,
   };
 }
 
@@ -216,7 +236,7 @@ function attachPanHandlers(chart, canvas) {
   let raf = null;
   const flushPan = () => {
     raf = null;
-    if (isPanning) return;
+    if (!isPanning) return;
     chart.pan(pending, undefined, "none");
     pending = { x: 0, y: 0 };
   };
@@ -235,7 +255,7 @@ function attachPanHandlers(chart, canvas) {
     setCursor(canvas, "grabbing");
   };
   const move = (e) => {
-    if (isPanning === false) return;
+    if (!isPanning) return;
     e.preventDefault();
     const dx = e.clientX - lastX;
     const dy = e.clientY - lastY;
@@ -246,7 +266,7 @@ function attachPanHandlers(chart, canvas) {
     if (!raf) raf = requestAnimationFrame(flushPan);
   };
   const up = (e) => {
-    if (isPanning === false) return;
+    if (!isPanning) return;
     isPanning = false;
     pending = { x: 0, y: 0 };
     setCursor(canvas, "grab");
@@ -331,6 +351,7 @@ async function loadHistory(loadToken, ticker, range, interval) {
   if (priceChart) priceChart.destroy();
   const priceCanvas = document.getElementById("priceChart");
   const ctx = priceCanvas.getContext("2d");
+  const zoomOpts = zoomOptions(priceCanvas);
   priceChart = new Chart(ctx, {
     type: "line",
     data: {
@@ -352,10 +373,10 @@ async function loadHistory(loadToken, ticker, range, interval) {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: "index", intersect: false },
-      scales: { x: { ticks: { maxRotation: 0 } } },
+      scales: zoomOpts.scales,
       plugins: {
-        legend: { display: true },
-        zoom: zoomOptions(priceCanvas),
+        legend: { display: true, labels: { color: zoomOpts.legendColor } },
+        zoom: { zoom: zoomOpts.zoom, pan: zoomOpts.pan, limits: zoomOpts.limits },
         crosshair: { enabled: true },
       },
     },
@@ -401,6 +422,7 @@ async function loadPrediction(loadToken, ticker) {
   if (predChart) predChart.destroy();
   const predCanvas = document.getElementById("predChart");
   const ctx = predCanvas.getContext("2d");
+  const zoomOpts = zoomOptions(predCanvas);
   predChart = new Chart(ctx, {
     type: "line",
     data: {
@@ -432,10 +454,10 @@ async function loadPrediction(loadToken, ticker) {
       responsive: true,
       maintainAspectRatio: false,
       interaction: { mode: "index", intersect: false },
-      scales: { x: { ticks: { maxRotation: 0 } } },
+      scales: zoomOpts.scales,
       plugins: {
-        legend: { display: true },
-        zoom: zoomOptions(predCanvas),
+        legend: { display: true, labels: { color: zoomOpts.legendColor } },
+        zoom: { zoom: zoomOpts.zoom, pan: zoomOpts.pan, limits: zoomOpts.limits },
         crosshair: { enabled: true },
       },
     },

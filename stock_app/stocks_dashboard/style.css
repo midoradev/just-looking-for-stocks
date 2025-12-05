@@ -1,6 +1,7 @@
 :root {
   --bg: #f5f7fb;
   --panel: #ffffff;
+  --panel-muted: #f2f5fb;
   --border: #d7deea;
   --text: #1b2333;
   --muted: #5a667a;
@@ -10,6 +11,7 @@
 :root.dark {
   --bg: #0f172a;
   --panel: #111827;
+  --panel-muted: #1f2937;
   --border: #1f2937;
   --text: #e5e7eb;
   --muted: #94a3b8;
@@ -58,20 +60,22 @@ input[type="text"] {
   padding: 10px 12px;
   border-radius: 8px;
   border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
   font-size: 14px;
 }
 button, .chip {
   padding: 10px 12px;
   border-radius: 8px;
   border: 1px solid var(--border);
-  background: #eef2f8;
+  background: var(--panel-muted);
   color: var(--text);
   cursor: pointer;
   font-weight: 600;
 }
 button.primary { background: var(--accent); color: white; border-color: var(--accent); }
 button:disabled { opacity: 0.6; cursor: not-allowed; }
-.chip { display: inline-flex; gap: 6px; align-items: center; background: #f2f5fb; }
+.chip { display: inline-flex; gap: 6px; align-items: center; background: var(--panel-muted); }
 .range-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
 .range-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
 table {
@@ -85,19 +89,20 @@ th, td {
   padding: 7px 8px;
   text-align: left;
 }
-th { background: #f1f4fa; }
+th { background: var(--panel-muted); color: var(--text); }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
 .error { color: var(--danger); margin-top: 6px; font-size: 14px; }
 .chart-area { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-top: 10px; }
 canvas { width: 100% !important; height: 320px !important; cursor: grab; }
 .chart-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
 .hint { font-size: 12px; color: var(--muted); }
-.ghost-btn { background: #f6f8fc; border-color: var(--border); padding: 6px 10px; font-weight: 600; }
+.ghost-btn { background: var(--panel-muted); border-color: var(--border); padding: 6px 10px; font-weight: 600; color: var(--text); }
 .inline-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 select {
   padding: 8px 10px;
   border-radius: 8px;
   border: 1px solid var(--border);
-  background: #fff;
+  background: var(--panel);
+  color: var(--text);
   font-size: 14px;
 }
