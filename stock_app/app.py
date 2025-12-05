@@ -81,12 +81,23 @@ def api_history():
 @app.route("/api/predict")
 def api_predict():
     ticker_input = request.args.get("ticker", "").strip()
+    range_key = request.args.get("range", "1m")
+    interval = request.args.get("interval", "").strip().lower() or None
     if not ticker_input:
         return jsonify({"error": "ticker is required"}), 400
+
+    days_value = RANGE_MAP.get(range_key, RANGE_MAP["1m"])
+    if days_value == "ytd":
+        today = datetime.now().date()
+        year_start = datetime(year=today.year, month=1, day=1).date()
+        days = max((today - year_start).days + 1, 1)
+    else:
+        days = int(days_value)
     try:
         ticker = find_ticker(ticker_input)
-        result = predict_prices(ticker)
+        result = predict_prices(ticker, days, range_key=range_key, interval=interval)
         result["symbol"] = ticker
+        result["range"] = range_key
         return jsonify(result)
     except Exception as exc:  # noqa: BLE001
         return jsonify({"error": str(exc)}), 400

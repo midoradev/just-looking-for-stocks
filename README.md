@@ -5,8 +5,9 @@ A website for stocks
 - Flask API + simple frontend (Chart.js) for stock info, history, and LSTM-based close-price predictions.
 - Data via Yahoo Finance (yfinance and direct search/screener endpoints).
 - Models are cached per ticker under `models/` (gitignored); trained on-demand with a lightweight LSTM.
+- Recommended to run locally on your own machine: you avoid network egress limits, keep API keys out of hosted logs, and can leverage your GPU/Metal stack directly.
 
-## Quickstart (CPU)
+## Quickstart (CPU, recommended)
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -50,6 +51,11 @@ python -m stock_app.app
 - Search: uses Yahoo Finance search, autocomplete fallback, then local map.
 - History: picks sensible defaults per range; interval override allowed (short intervals only for <6m).
 - Frontend: plain HTML/JS; Chart.js + chartjs-plugin-zoom.
+- Local-first: everything runs on localhost; no credentials are required. If you do host it, ensure TLS and apply rate limits to avoid being blocked by Yahoo for excessive requests.
+- Fetch/cache: history and full-history calls are cached briefly in-memory to reduce Yahoo hits; caches auto-evict and expire.
+- Training: prediction runs a short training loop (few epochs) with a small validation split and early stopping to stabilize forecasts.
+- UI resilience: info/history/prediction load independently; one API hiccup won’t blank the page.
+- Hosting (prod): run behind a WSGI server, e.g. `gunicorn "stock_app.app:app"` (Linux/macOS) or `waitress-serve --port=5000 stock_app.app:app` (Windows-friendly). Put nginx/HTTPS in front, set `PORT` if needed, and add simple rate limiting to avoid Yahoo throttling.
 
 ## Contributing
 - Prefer PRs with small, focused changes.

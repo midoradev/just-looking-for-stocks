@@ -114,12 +114,12 @@ rangeTabs.addEventListener("click", (e) => {
   }
   btn.classList.add("active");
   state.range = btn.dataset.range;
-  loadHistory(activeLoadToken, state.ticker, state.range, state.interval);
+  loadAll();
 });
 
 intervalSelect.addEventListener("change", () => {
   state.interval = intervalSelect.value;
-  loadHistory(activeLoadToken, state.ticker, state.range, state.interval);
+  loadAll();
 });
 
 toggleHistoryRowsBtn.addEventListener("click", () => {
@@ -176,6 +176,23 @@ function formatUSD(num) {
   return "$" + Number(num).toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
+function formatDateLabel(range, value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  const pad = (n) => String(n).padStart(2, "0");
+  const month = pad(date.getMonth() + 1);
+  const day = pad(date.getDate());
+  const yearShort = String(date.getFullYear()).slice(-2);
+  const hours = pad(date.getHours());
+  const minutes = pad(date.getMinutes());
+  const hasTime = value.includes(":");
+  const shortRanges = new Set(["1d", "1w", "1m", "3m", "6m", "ytd"]);
+  if (shortRanges.has(range)) {
+    return hasTime ? `${month}/${day} ${hours}:${minutes}` : `${month}/${day}`;
+  }
+  return `${yearShort}/${month}/${day}`;
+}
+
 function setCursor(el, cursor) {
   if (el) el.style.cursor = cursor;
 }
@@ -184,6 +201,7 @@ function zoomOptions(canvas) {
   const styles = getComputedStyle(document.documentElement);
   const textColor = styles.getPropertyValue("--text").trim() || "#1b2333";
   const borderColor = styles.getPropertyValue("--border").trim() || "#d7deea";
+  const gridColor = styles.getPropertyValue("--grid")?.trim() || borderColor;
   return {
     textColor,
     borderColor,
@@ -208,11 +226,11 @@ function zoomOptions(canvas) {
     scales: {
       x: {
         ticks: { color: textColor, maxRotation: 0 },
-        grid: { color: borderColor },
+        grid: { color: gridColor },
       },
       y: {
         ticks: { color: textColor },
-        grid: { color: borderColor },
+        grid: { color: gridColor },
       },
     },
     legendColor: textColor,
@@ -346,7 +364,7 @@ async function loadHistory(loadToken, ticker, range, interval) {
   document.getElementById("priceMeta").textContent = `${data.symbol} • ${range.toUpperCase()} • ${intervalLabel} • ${prices.length} rows`;
 
   // Build price chart (close)
-  const labels = prices.map((p) => p.Date);
+  const labels = prices.map((p) => formatDateLabel(range, p.Date));
   const closes = prices.map((p) => p.Close);
   if (priceChart) priceChart.destroy();
   const priceCanvas = document.getElementById("priceChart");
@@ -392,11 +410,13 @@ async function loadHistory(loadToken, ticker, range, interval) {
 function renderPredTable(validation) {
   const tbody = document.querySelector("#predTable tbody");
   tbody.innerHTML = "";
-  const tableRows = [...validation].sort((a, b) => new Date(b.Date) - new Date(a.Date));
+  const tableRows = [...validation]
+    .map((row) => ({ ...row, _dateObj: new Date(row.Date), _raw: row.Date }))
+    .sort((a, b) => b._dateObj - a._dateObj);
   const rows = state.showFullPred ? tableRows : tableRows.slice(0, 10);
   for (const row of rows) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${row.Date}</td><td>${formatUSD(row.Close)}</td><td>${formatUSD(row.Prediction)}</td>`;
+    tr.innerHTML = `<td>${formatDateLabel(state.range, row._raw)}</td><td>${formatUSD(row.Close)}</td><td>${formatUSD(row.Prediction)}</td>`;
     tbody.appendChild(tr);
   }
   const meta = document.getElementById("predRowsMeta");
@@ -406,7 +426,13 @@ function renderPredTable(validation) {
 }
 
 async function loadPrediction(loadToken, ticker) {
-  const data = await fetchJSON(`/api/predict?ticker=${encodeURIComponent(ticker)}&t=${Date.now()}`);
+  const query = new URLSearchParams({
+    ticker,
+    range: state.range,
+    interval: state.interval,
+    t: Date.now().toString(),
+  });
+  const data = await fetchJSON(`/api/predict?${query.toString()}`);
   if (loadToken !== activeLoadToken) return;
   document.getElementById("predictionValue").textContent = formatUSD(data.predicted_next_close);
   document.getElementById("rmseValue").textContent = formatUSD(data.rmse);
@@ -416,7 +442,7 @@ async function loadPrediction(loadToken, ticker) {
   renderPredTable(validation);
 
   // Build prediction chart
-  const labels = validation.map((d) => d.Date);
+  const labels = validation.map((d) => formatDateLabel(state.range, d.Date));
   const actual = validation.map((d) => d.Close);
   const preds = validation.map((d) => d.Prediction);
   if (predChart) predChart.destroy();
@@ -539,15 +565,18 @@ async function loadAll() {
   state.historyData = [];
   state.validationData = [];
   setError("");
-  try {
-    await Promise.all([
-      loadInfo(loadToken, state.ticker),
-      loadHistory(loadToken, state.ticker, state.range, state.interval),
-      loadPrediction(loadToken, state.ticker),
-    ]);
-  } catch (err) {
-    console.error(err);
-    setError(err.message || "Unknown error");
+  const tasks = [
+    { name: "Info", run: () => loadInfo(loadToken, state.ticker) },
+    { name: "History", run: () => loadHistory(loadToken, state.ticker, state.range, state.interval) },
+    { name: "Prediction", run: () => loadPrediction(loadToken, state.ticker) },
+  ];
+  const results = await Promise.allSettled(tasks.map((t) => t.run()));
+  const errors = tasks
+    .map((task, idx) => ({ task: task.name, result: results[idx] }))
+    .filter((entry) => entry.result.status === "rejected")
+    .map((entry) => `${entry.task}: ${entry.result.reason?.message || "Request failed"}`);
+  if (errors.length) {
+    setError(errors.join(" • "));
   }
 }
 

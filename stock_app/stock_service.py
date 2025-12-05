@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from difflib import get_close_matches
 import re
+import time
 from urllib.parse import urlencode
 from collections import OrderedDict
 import gc
@@ -14,6 +15,7 @@ import yfinance as yf
 from keras import backend as K
 from keras.layers import Dense, LSTM, Input
 from keras.models import Sequential, load_model
+from keras.callbacks import EarlyStopping
 from sklearn.preprocessing import MinMaxScaler
 
 # Map common company names to tickers
@@ -39,8 +41,15 @@ YAHOO_SEARCH_URL = "https://query2.finance.yahoo.com/v1/finance/search"
 YAHOO_AUTOC_URL = "https://autoc.finance.yahoo.com/autoc"
 YAHOO_SCREENER_URL = "https://query1.finance.yahoo.com/v1/finance/screener/predefined/saved"
 SYMBOL_PATTERN = re.compile(r"^[A-Za-z0-9.\-^=]{1,10}$")
-MODEL_CACHE: "OrderedDict[str, tuple[Sequential, MinMaxScaler]]" = OrderedDict()
+MODEL_CACHE: "OrderedDict[tuple[str, int], tuple[Sequential, MinMaxScaler]]" = OrderedDict()
 MAX_MODEL_CACHE = 2
+MIN_PRED_POINTS = 22  # minimum closes required to attempt a forecast
+HISTORY_CACHE: "OrderedDict[tuple[str, int, str, str], tuple[float, pd.DataFrame, str]]" = OrderedDict()
+HISTORY_CACHE_TTL = 300  # seconds
+HISTORY_CACHE_MAX = 12
+FULL_HISTORY_CACHE: "OrderedDict[str, tuple[float, pd.DataFrame]]" = OrderedDict()
+FULL_HISTORY_TTL = 3600  # seconds
+FULL_HISTORY_MAX = 12
 
 
 def find_ticker(user_input: str) -> str:
@@ -215,6 +224,7 @@ def get_stock_info(ticker: str) -> dict:
 
 SHORT_INTERVALS = {"1m", "2m", "5m", "15m", "30m", "1h", "1d"}
 LONG_INTERVALS = {"1d", "5d", "1wk", "1mo", "3mo"}
+YF_TIMEOUT = 6
 
 
 def _choose_interval(range_key: str | None, requested: str | None) -> str:
@@ -255,48 +265,89 @@ def get_history(
     ticker: str, days: int, range_key: str | None = None, interval: str | None = None
 ) -> tuple[pd.DataFrame, str]:
     """Return historical prices with flexible interval selection."""
+    ticker_upper = ticker.upper()
+    cache_key = (ticker_upper, days, range_key or "", interval or "")
+    now = time.time()
+    cached = HISTORY_CACHE.get(cache_key)
+    if cached:
+        ts, cached_df, cached_interval = cached
+        if now - ts < HISTORY_CACHE_TTL:
+            HISTORY_CACHE.move_to_end(cache_key)
+            return cached_df.copy(), cached_interval
+        HISTORY_CACHE.pop(cache_key, None)
+
     stock = yf.Ticker(ticker)
     eff_interval = _choose_interval(range_key, interval)
     kwargs = _choose_period(range_key, days, eff_interval)
     try:
-        df = stock.history(interval=eff_interval, **kwargs)
+        df = stock.history(interval=eff_interval, timeout=YF_TIMEOUT, **kwargs)
     except Exception:
         # Retry with default if the requested interval is unsupported for this range.
         eff_interval = _choose_interval(range_key, None)
         kwargs = _choose_period(range_key, days, eff_interval)
-        df = stock.history(interval=eff_interval, **kwargs)
+        df = stock.history(interval=eff_interval, timeout=YF_TIMEOUT, **kwargs)
     if df.empty:
-        raise ValueError("No data available for this ticker and range.")
+        try:
+            # Fall back to a longer daily window to avoid empty responses.
+            df = _get_full_history(ticker).reset_index()
+            eff_interval = "1d"
+        except Exception as exc:
+            raise ValueError("No data available for this ticker and range.") from exc
     df = df.reset_index()
     # Use datetime for intraday-like intervals, date for longer windows.
     if eff_interval in {"1m", "2m", "5m", "15m", "30m", "1h"} and "Datetime" in df.columns:
         df["Date"] = pd.to_datetime(df["Datetime"]).dt.strftime("%Y-%m-%d %H:%M")
     else:
         df["Date"] = pd.to_datetime(df["Date"]).dt.strftime("%Y-%m-%d")
-    return df[["Date", "Open", "High", "Low", "Close", "Volume"]], eff_interval
+    final_df = df[["Date", "Open", "High", "Low", "Close", "Volume"]]
+    HISTORY_CACHE[cache_key] = (now, final_df.copy(), eff_interval)
+    HISTORY_CACHE.move_to_end(cache_key)
+    while len(HISTORY_CACHE) > HISTORY_CACHE_MAX:
+        HISTORY_CACHE.popitem(last=False)
+    return final_df, eff_interval
 
 
 def _get_full_history(ticker: str) -> pd.DataFrame:
-    df = yf.Ticker(ticker).history(start="2012-01-01", end=datetime.now())
+    key = ticker.upper()
+    now = time.time()
+    cached = FULL_HISTORY_CACHE.get(key)
+    if cached:
+        ts, df_cached = cached
+        if now - ts < FULL_HISTORY_TTL:
+            FULL_HISTORY_CACHE.move_to_end(key)
+            return df_cached.copy()
+        FULL_HISTORY_CACHE.pop(key, None)
+
+    stock = yf.Ticker(key)
+    df = stock.history(start="2012-01-01", end=datetime.now(), timeout=YF_TIMEOUT)
+    if df.empty:
+        # Try Yahoo's full span if the bounded query returns nothing.
+        df = stock.history(period="max", timeout=YF_TIMEOUT)
     if df.empty:
         raise ValueError("No historical data available for this ticker.")
+
+    FULL_HISTORY_CACHE[key] = (now, df.copy())
+    FULL_HISTORY_CACHE.move_to_end(key)
+    while len(FULL_HISTORY_CACHE) > FULL_HISTORY_MAX:
+        FULL_HISTORY_CACHE.popitem(last=False)
     return df
 
 
-def _warmup_predict(model):
+def _warmup_predict(model, lookback: int):
     """Prime the model predict function to avoid repeated retracing warnings."""
     try:
-        dummy = np.zeros((1, 60, 1), dtype=np.float32)
+        dummy = np.zeros((1, lookback, 1), dtype=np.float32)
         model.predict(dummy, verbose=0)
     except Exception:
         # If warmup fails, skip without breaking the main flow.
         pass
 
 
-def _cache_model(ticker: str, model: Sequential, scaler: MinMaxScaler):
+def _cache_model(ticker: str, lookback: int, model: Sequential, scaler: MinMaxScaler):
     """Store the model with a tiny LRU cache to keep memory in check."""
-    MODEL_CACHE[ticker] = (model, scaler)
-    MODEL_CACHE.move_to_end(ticker)
+    key = (ticker, lookback)
+    MODEL_CACHE[key] = (model, scaler)
+    MODEL_CACHE.move_to_end(key)
     while len(MODEL_CACHE) > MAX_MODEL_CACHE:
         _, (old_model, _) = MODEL_CACHE.popitem(last=False)
         try:
@@ -307,30 +358,40 @@ def _cache_model(ticker: str, model: Sequential, scaler: MinMaxScaler):
         gc.collect()
 
 
-def load_or_train_model(ticker: str, dataset: np.ndarray):
+def load_or_train_model(ticker: str, dataset: np.ndarray, lookback: int):
     dataset = dataset.astype(np.float32)
-    if ticker in MODEL_CACHE:
-        MODEL_CACHE.move_to_end(ticker)
-        return MODEL_CACHE[ticker]
+    key = (ticker, lookback)
+    if key in MODEL_CACHE:
+        MODEL_CACHE.move_to_end(key)
+        return MODEL_CACHE[key]
 
-    model_path = MODEL_DIR / f"{ticker}_model.keras"
-    scaler_path = MODEL_DIR / f"{ticker}_scaler.pkl"
+    # Prefer lookback-specific files; fall back to legacy names when lookback is 60.
+    model_path = MODEL_DIR / f"{ticker}_lb{lookback}_model.keras"
+    scaler_path = MODEL_DIR / f"{ticker}_lb{lookback}_scaler.pkl"
+    legacy_model_path = MODEL_DIR / f"{ticker}_model.keras"
+    legacy_scaler_path = MODEL_DIR / f"{ticker}_scaler.pkl"
 
     if model_path.exists() and scaler_path.exists():
         model = load_model(model_path)
         scaler = joblib.load(scaler_path)
-        _cache_model(ticker, model, scaler)
-        _warmup_predict(model)
+        _cache_model(ticker, lookback, model, scaler)
+        _warmup_predict(model, lookback)
+        return model, scaler
+    if lookback == 60 and legacy_model_path.exists() and legacy_scaler_path.exists():
+        model = load_model(legacy_model_path)
+        scaler = joblib.load(legacy_scaler_path)
+        _cache_model(ticker, lookback, model, scaler)
+        _warmup_predict(model, lookback)
         return model, scaler
 
     scaler = MinMaxScaler(feature_range=(0, 1))
     scaled_data = scaler.fit_transform(dataset).astype(np.float32)
-    training_data_len = int(np.ceil(len(dataset) * 0.95))
+    training_data_len = _compute_train_len(len(dataset), lookback)
     train_data = scaled_data[0:training_data_len, :]
 
     x_train, y_train = [], []
-    for i in range(60, len(train_data)):
-        x_train.append(train_data[i - 60:i, 0])
+    for i in range(lookback, len(train_data)):
+        x_train.append(train_data[i - lookback : i, 0])
         y_train.append(train_data[i, 0])
 
     x_train, y_train = np.array(x_train), np.array(y_train)
@@ -343,31 +404,93 @@ def load_or_train_model(ticker: str, dataset: np.ndarray):
     model.add(Dense(25))
     model.add(Dense(1))
     model.compile(optimizer="adam", loss="mean_squared_error")
-    model.fit(x_train, y_train, batch_size=1, epochs=1, verbose=0)
+
+    val_split = 0.1 if len(x_train) > 20 else 0.0
+    callbacks = []
+    if val_split > 0:
+        callbacks.append(EarlyStopping(patience=1, restore_best_weights=True, monitor="val_loss"))
+    model.fit(
+        x_train,
+        y_train,
+        batch_size=1,
+        epochs=5,
+        verbose=0,
+        shuffle=False,
+        validation_split=val_split,
+        callbacks=callbacks,
+    )
 
     model.save(model_path)
     joblib.dump(scaler, scaler_path)
-    _cache_model(ticker, model, scaler)
-    _warmup_predict(model)
+    _cache_model(ticker, lookback, model, scaler)
+    _warmup_predict(model, lookback)
     return model, scaler
 
 
-def predict_prices(ticker: str) -> dict:
-    df = _get_full_history(ticker)
-    data = df[["Close"]]
-    dataset = data.values.astype(np.float32)
-    if len(dataset) < 80:
-        raise ValueError("Not enough data to build a prediction window.")
+def _format_date_column(df: pd.DataFrame, interval: str) -> pd.Series:
+    if "Date" in df.columns:
+        col = df["Date"]
+    elif "Datetime" in df.columns:
+        col = df["Datetime"]
+    else:
+        col = df.index
+    if interval in {"1m", "2m", "5m", "15m", "30m", "1h"}:
+        return pd.to_datetime(col).dt.strftime("%Y-%m-%d %H:%M")
+    return pd.to_datetime(col).dt.strftime("%Y-%m-%d")
 
-    model, scaler = load_or_train_model(ticker, dataset)
+
+def _choose_lookback(length: int) -> int:
+    if length >= 100:
+        return 60
+    if length >= 80:
+        return 50
+    if length >= 60:
+        return 40
+    if length >= 40:
+        return 30
+    return 20
+
+
+def _compute_train_len(length: int, lookback: int) -> int:
+    base = int(np.ceil(length * 0.9))
+    train_len = min(length - 1, max(base, lookback + 1))
+    if train_len <= lookback and length > lookback + 1:
+        train_len = length - 1
+    return train_len
+
+
+def predict_prices(ticker: str, days: int, range_key: str | None = None, interval: str | None = None) -> dict:
+    # Try requested window/interval first; fall back to full daily history if not enough data.
+    try:
+        df, eff_interval = get_history(ticker, days, range_key=range_key, interval=interval)
+    except Exception:
+        df, eff_interval = _get_full_history(ticker).reset_index(), "1d"
+    else:
+        if len(df) < MIN_PRED_POINTS:
+            try:
+                df_full = _get_full_history(ticker).reset_index()
+                if len(df_full) > len(df):
+                    df, eff_interval = df_full, "1d"
+            except Exception:
+                pass
+
+    dates = _format_date_column(df, eff_interval).reset_index(drop=True)
+    close_series = df["Close"].reset_index(drop=True)
+    dataset = close_series.values.astype(np.float32).reshape(-1, 1)
+    if len(dataset) < MIN_PRED_POINTS:
+        raise ValueError("Not enough historical data to build a prediction window yet.")
+
+    lookback = _choose_lookback(len(dataset))
+    training_data_len = _compute_train_len(len(dataset), lookback)
+
+    model, scaler = load_or_train_model(ticker, dataset, lookback)
 
     scaled_data = scaler.transform(dataset).astype(np.float32)
-    training_data_len = int(np.ceil(len(dataset) * 0.95))
-    test_data = scaled_data[training_data_len - 60 :, :]
+    test_data = scaled_data[training_data_len - lookback :, :]
 
     x_test, y_test = [], dataset[training_data_len:, :]
-    for i in range(60, len(test_data)):
-        x_test.append(test_data[i - 60 : i, 0])
+    for i in range(lookback, len(test_data)):
+        x_test.append(test_data[i - lookback : i, 0])
     x_test = np.array(x_test, dtype=np.float32)
     if x_test.size == 0:
         raise ValueError("Not enough data to build a prediction window.")
@@ -378,13 +501,17 @@ def predict_prices(ticker: str) -> dict:
 
     rmse = float(np.sqrt(np.mean((predictions - y_test) ** 2)))
 
-    valid = data[training_data_len:].copy()
+    valid = pd.DataFrame(
+        {
+            "Date": dates.iloc[training_data_len:].reset_index(drop=True),
+            "Close": close_series.iloc[training_data_len:].reset_index(drop=True),
+        }
+    )
     valid["Prediction"] = predictions[:, 0]
-    valid = valid.reset_index()
-    valid["Date"] = valid["Date"].dt.strftime("%Y-%m-%d")
 
     return {
         "rmse": rmse,
         "predicted_next_close": float(predictions[-1, 0]),
         "validation": valid[["Date", "Close", "Prediction"]].to_dict(orient="records"),
+        "interval": eff_interval,
     }
