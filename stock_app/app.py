@@ -83,6 +83,7 @@ def api_predict():
     ticker_input = request.args.get("ticker", "").strip()
     range_key = request.args.get("range", "1m")
     interval = request.args.get("interval", "").strip().lower() or None
+    price_field = request.args.get("price_field", "close").strip().lower() or "close"
     if not ticker_input:
         return jsonify({"error": "ticker is required"}), 400
 
@@ -95,7 +96,13 @@ def api_predict():
         days = int(days_value)
     try:
         ticker = find_ticker(ticker_input)
-        result = predict_prices(ticker, days, range_key=range_key, interval=interval)
+        result = predict_prices(
+            ticker,
+            days,
+            range_key=range_key,
+            interval=interval,
+            price_field=price_field,
+        )
         result["symbol"] = ticker
         result["range"] = range_key
         return jsonify(result)

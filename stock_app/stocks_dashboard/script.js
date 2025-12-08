@@ -2,6 +2,7 @@ const state = {
   ticker: "AAPL",
   range: "1m",
   interval: "auto",
+  priceField: "close",
   showFullHistory: false,
   showFullPred: false,
   historyData: [],
@@ -103,6 +104,7 @@ let activeLoadToken = 0;
 const tickerInput = document.getElementById("tickerInput");
 const rangeTabs = document.getElementById("rangeTabs");
 const intervalSelect = document.getElementById("intervalSelect");
+const priceFieldSelect = document.getElementById("priceFieldSelect");
 const toggleHistoryRowsBtn = document.getElementById("toggleHistoryRows");
 const togglePredRowsBtn = document.getElementById("togglePredRows");
 const themeToggle = document.getElementById("themeToggle");
@@ -119,6 +121,11 @@ rangeTabs.addEventListener("click", (e) => {
 
 intervalSelect.addEventListener("change", () => {
   state.interval = intervalSelect.value;
+  loadAll();
+});
+
+priceFieldSelect.addEventListener("change", () => {
+  state.priceField = priceFieldSelect.value;
   loadAll();
 });
 
@@ -197,6 +204,31 @@ function formatDateLabel(range, value) {
 
 function setCursor(el, cursor) {
   if (el) el.style.cursor = cursor;
+}
+
+function priceFieldLabel(value) {
+  switch ((value || "").toLowerCase()) {
+    case "open":
+      return "Open";
+    case "high":
+      return "High";
+    case "low":
+      return "Low";
+    case "current":
+      return "Current";
+    case "close":
+    default:
+      return "Close";
+  }
+}
+
+function pickPrice(row, field) {
+  const key = (field || "").toLowerCase();
+  if (key === "open") return row.Open;
+  if (key === "high") return row.High;
+  if (key === "low") return row.Low;
+  // "current" maps to the latest traded/close price in the history payload
+  return row.Close;
 }
 
 function zoomOptions(canvas) {
@@ -314,6 +346,41 @@ function setError(msg) {
   }
 }
 
+function chartLoaderEl(key) {
+  return document.querySelector(`[data-chart-loader="${key}"]`);
+}
+
+function showChartLoader(key, title, message) {
+  const el = chartLoaderEl(key);
+  if (!el) return;
+  const titleEl = el.querySelector(".chart-loader__title");
+  const msgEl = el.querySelector(".chart-loader__message");
+  const spinner = el.querySelector(".chart-loader__spinner");
+  if (titleEl && title) titleEl.textContent = title;
+  if (msgEl && message) msgEl.textContent = message;
+  if (spinner) spinner.style.display = "block";
+  el.classList.remove("error");
+  el.style.display = "flex";
+}
+
+function showChartError(key, message) {
+  const el = chartLoaderEl(key);
+  if (!el) return;
+  const titleEl = el.querySelector(".chart-loader__title");
+  const msgEl = el.querySelector(".chart-loader__message");
+  if (titleEl) titleEl.textContent = "Unable to load chart";
+  if (msgEl) msgEl.textContent = message || "Something went wrong.";
+  el.classList.add("error");
+  el.style.display = "flex";
+}
+
+function hideChartLoader(key) {
+  const el = chartLoaderEl(key);
+  if (!el) return;
+  el.style.display = "none";
+  el.classList.remove("error");
+}
+
 async function loadInfo(loadToken, ticker) {
   const info = await fetchJSON(`/api/info?ticker=${encodeURIComponent(ticker)}&t=${Date.now()}`);
   if (loadToken !== activeLoadToken) return;
@@ -343,7 +410,8 @@ function renderHistoryTable(data) {
   btn.textContent = state.showFullHistory ? "Show summary" : "Show all";
 }
 
-async function loadHistory(loadToken, ticker, range, interval) {
+async function loadHistory(loadToken, ticker, range, interval, priceField) {
+  showChartLoader("price", `Preparing ${priceFieldLabel(priceField)} chart…`, "Fetching price history");
   const query = new URLSearchParams({
     ticker,
     range,
@@ -352,61 +420,71 @@ async function loadHistory(loadToken, ticker, range, interval) {
   if (interval && interval !== "auto") {
     query.set("interval", interval);
   }
-  const data = await fetchJSON(`/api/history?${query.toString()}`);
-  if (loadToken !== activeLoadToken) return;
-  const prices = data.prices || [];
-  state.historyData = prices;
-  renderHistoryTable(prices);
-  let intervalLabel = "auto";
-  if (data.interval) {
-    intervalLabel = data.interval;
-  } else if (interval && interval !== "auto") {
-    intervalLabel = interval;
-  }
-  document.getElementById("priceMeta").textContent = `${data.symbol} • ${range.toUpperCase()} • ${intervalLabel} • ${prices.length} rows`;
+  try {
+    const data = await fetchJSON(`/api/history?${query.toString()}`);
+    if (loadToken !== activeLoadToken) return;
+    const prices = data.prices || [];
+    state.historyData = prices;
+    renderHistoryTable(prices);
+    let intervalLabel = "auto";
+    if (data.interval) {
+      intervalLabel = data.interval;
+    } else if (interval && interval !== "auto") {
+      intervalLabel = interval;
+    }
+    document.getElementById("priceMeta").textContent = `${data.symbol} • ${range.toUpperCase()} • ${intervalLabel} • ${prices.length} rows`;
 
-  // Build price chart (close)
-  const labels = prices.map((p) => formatDateLabel(range, p.Date));
-  const closes = prices.map((p) => p.Close);
-  if (priceChart) priceChart.destroy();
-  const priceCanvas = document.getElementById("priceChart");
-  const ctx = priceCanvas.getContext("2d");
-  const zoomOpts = zoomOptions(priceCanvas);
-  priceChart = new Chart(ctx, {
-    type: "line",
-    data: {
-      labels,
-      datasets: [
-        {
-          label: `Close (${intervalLabel})`,
-          data: closes,
-          borderColor: "#0052cc",
-          backgroundColor: "rgba(0,82,204,0.1)",
-          borderWidth: 2,
-          pointRadius: 0,
-          tension: 0.25,
-          fill: true,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: "index", intersect: false },
-      scales: zoomOpts.scales,
-      plugins: {
-        legend: { display: true, labels: { color: zoomOpts.legendColor } },
-        zoom: { zoom: zoomOpts.zoom, pan: zoomOpts.pan, limits: zoomOpts.limits },
-        crosshair: { enabled: true },
+    // Build price chart for the selected field
+    const labels = prices.map((p) => formatDateLabel(range, p.Date));
+    const values = prices.map((p) => pickPrice(p, priceField));
+    const fieldLabel = priceFieldLabel(priceField);
+    document.getElementById("priceChartLabel").textContent = `Price chart (${fieldLabel})`;
+    if (priceChart) priceChart.destroy();
+    const priceCanvas = document.getElementById("priceChart");
+    const ctx = priceCanvas.getContext("2d");
+    const zoomOpts = zoomOptions(priceCanvas);
+    priceChart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: `${fieldLabel} (${intervalLabel})`,
+            data: values,
+            borderColor: "#0052cc",
+            backgroundColor: "rgba(0,82,204,0.1)",
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.25,
+            fill: true,
+          },
+        ],
       },
-    },
-  });
-  attachPanHandlers(priceChart, priceCanvas);
-  const reset = document.getElementById("resetPriceZoom");
-  reset.onclick = () => {
-    if (priceChart) priceChart.resetZoom();
-    setCursor(priceCanvas, "grab");
-  };
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        scales: zoomOpts.scales,
+        plugins: {
+          legend: { display: true, labels: { color: zoomOpts.legendColor } },
+          zoom: { zoom: zoomOpts.zoom, pan: zoomOpts.pan, limits: zoomOpts.limits },
+          crosshair: { enabled: true },
+        },
+      },
+    });
+    attachPanHandlers(priceChart, priceCanvas);
+    const reset = document.getElementById("resetPriceZoom");
+    reset.onclick = () => {
+      if (priceChart) priceChart.resetZoom();
+      setCursor(priceCanvas, "grab");
+    };
+    hideChartLoader("price");
+  } catch (err) {
+    if (loadToken === activeLoadToken) {
+      showChartError("price", err?.message || "Unable to load price chart.");
+    }
+    throw err;
+  }
 }
 
 function renderPredTable(validation) {
@@ -418,7 +496,7 @@ function renderPredTable(validation) {
   const rows = state.showFullPred ? tableRows : tableRows.slice(0, 10);
   for (const row of rows) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${formatDateLabel(state.range, row._raw)}</td><td>${formatUSD(row.Close)}</td><td>${formatUSD(row.Prediction)}</td>`;
+    tr.innerHTML = `<td>${formatDateLabel(state.range, row._raw)}</td><td>${formatUSD(row.Actual)}</td><td>${formatUSD(row.Prediction)}</td>`;
     tbody.appendChild(tr);
   }
   const meta = document.getElementById("predRowsMeta");
@@ -427,75 +505,92 @@ function renderPredTable(validation) {
   btn.textContent = state.showFullPred ? "Show summary" : "Show all";
 }
 
-async function loadPrediction(loadToken, ticker) {
+async function loadPrediction(loadToken, ticker, priceField) {
+  showChartLoader(
+    "pred",
+    `Preparing ${priceFieldLabel(priceField)} prediction…`,
+    "Training model and forecasting next price",
+  );
   const query = new URLSearchParams({
     ticker,
     range: state.range,
     interval: state.interval,
+    price_field: priceField,
     t: Date.now().toString(),
   });
-  const data = await fetchJSON(`/api/predict?${query.toString()}`);
-  if (loadToken !== activeLoadToken) return;
-  document.getElementById("predictionValue").textContent = formatUSD(data.predicted_next_close);
-  document.getElementById("rmseValue").textContent = formatUSD(data.rmse);
+  try {
+    const data = await fetchJSON(`/api/predict?${query.toString()}`);
+    if (loadToken !== activeLoadToken) return;
+    const fieldLabel = data.price_field_label || priceFieldLabel(priceField);
+    document.getElementById("predictionLabel").textContent = `Next predicted ${fieldLabel.toLowerCase()}`;
+    document.getElementById("predictionValue").textContent = formatUSD(data.predicted_next_price ?? data.predicted_next_close);
+    document.getElementById("rmseValue").textContent = formatUSD(data.rmse);
+    document.getElementById("predActualHeader").textContent = `Actual ${fieldLabel}`;
 
-  const validation = data.validation || [];
-  state.validationData = validation;
-  renderPredTable(validation);
+    const validation = data.validation || [];
+    state.validationData = validation;
+    renderPredTable(validation);
 
-  // Build prediction chart
-  const labels = validation.map((d) => formatDateLabel(state.range, d.Date));
-  const actual = validation.map((d) => d.Close);
-  const preds = validation.map((d) => d.Prediction);
-  if (predChart) predChart.destroy();
-  const predCanvas = document.getElementById("predChart");
-  const ctx = predCanvas.getContext("2d");
-  const zoomOpts = zoomOptions(predCanvas);
-  predChart = new Chart(ctx, {
-    type: "line",
-    data: {
-      labels,
-      datasets: [
-        {
-          label: "Actual",
-          data: actual,
-          borderColor: "#008f5d",
-          backgroundColor: "rgba(0,143,93,0.12)",
-          borderWidth: 2,
-          pointRadius: 0,
-          tension: 0.25,
-          fill: true,
-        },
-        {
-          label: "Predicted",
-          data: preds,
-          borderColor: "#f4a11e",
-          backgroundColor: "rgba(244,161,30,0.12)",
-          borderWidth: 2,
-          pointRadius: 0,
-          tension: 0.25,
-          fill: true,
-        },
-      ],
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: "index", intersect: false },
-      scales: zoomOpts.scales,
-      plugins: {
-        legend: { display: true, labels: { color: zoomOpts.legendColor } },
-        zoom: { zoom: zoomOpts.zoom, pan: zoomOpts.pan, limits: zoomOpts.limits },
-        crosshair: { enabled: true },
+    // Build prediction chart
+    const labels = validation.map((d) => formatDateLabel(state.range, d.Date));
+    const actual = validation.map((d) => d.Actual);
+    const preds = validation.map((d) => d.Prediction);
+    if (predChart) predChart.destroy();
+    const predCanvas = document.getElementById("predChart");
+    const ctx = predCanvas.getContext("2d");
+    const zoomOpts = zoomOptions(predCanvas);
+    predChart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: [
+          {
+            label: `Actual ${fieldLabel}`,
+            data: actual,
+            borderColor: "#008f5d",
+            backgroundColor: "rgba(0,143,93,0.12)",
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.25,
+            fill: true,
+          },
+          {
+            label: `Predicted ${fieldLabel}`,
+            data: preds,
+            borderColor: "#f4a11e",
+            backgroundColor: "rgba(244,161,30,0.12)",
+            borderWidth: 2,
+            pointRadius: 0,
+            tension: 0.25,
+            fill: true,
+          },
+        ],
       },
-    },
-  });
-  attachPanHandlers(predChart, predCanvas);
-  const reset = document.getElementById("resetPredZoom");
-  reset.onclick = () => {
-    if (predChart) predChart.resetZoom();
-    setCursor(predCanvas, "grab");
-  };
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: "index", intersect: false },
+        scales: zoomOpts.scales,
+        plugins: {
+          legend: { display: true, labels: { color: zoomOpts.legendColor } },
+          zoom: { zoom: zoomOpts.zoom, pan: zoomOpts.pan, limits: zoomOpts.limits },
+          crosshair: { enabled: true },
+        },
+      },
+    });
+    attachPanHandlers(predChart, predCanvas);
+    const reset = document.getElementById("resetPredZoom");
+    reset.onclick = () => {
+      if (predChart) predChart.resetZoom();
+      setCursor(predCanvas, "grab");
+    };
+    hideChartLoader("pred");
+  } catch (err) {
+    if (loadToken === activeLoadToken) {
+      showChartError("pred", err?.message || "Unable to load prediction chart.");
+    }
+    throw err;
+  }
 }
 
 function renderOptions(list) {
@@ -549,6 +644,7 @@ async function loadAll() {
   state.ticker = (tickerInput.value.trim() || state.ticker || "").toUpperCase();
   tickerInput.value = state.ticker;
   state.interval = intervalSelect.value || "auto";
+  state.priceField = priceFieldSelect.value || "close";
   activeLoadToken += 1;
   const loadToken = activeLoadToken;
   if (priceChart) {
@@ -559,6 +655,8 @@ async function loadAll() {
     predChart.destroy();
     predChart = null;
   }
+  showChartLoader("price", "Preparing price chart…", "Fetching latest candles");
+  showChartLoader("pred", "Preparing prediction chart…", "Training model and forecasting next price");
   document.querySelector("#historyTable tbody").innerHTML = "";
   document.querySelector("#predTable tbody").innerHTML = "";
   document.getElementById("priceMeta").textContent = "Loading...";
@@ -569,8 +667,8 @@ async function loadAll() {
   setError("");
   const tasks = [
     { name: "Info", run: () => loadInfo(loadToken, state.ticker) },
-    { name: "History", run: () => loadHistory(loadToken, state.ticker, state.range, state.interval) },
-    { name: "Prediction", run: () => loadPrediction(loadToken, state.ticker) },
+    { name: "History", run: () => loadHistory(loadToken, state.ticker, state.range, state.interval, state.priceField) },
+    { name: "Prediction", run: () => loadPrediction(loadToken, state.ticker, state.priceField) },
   ];
   const results = await Promise.allSettled(tasks.map((t) => t.run()));
   const errors = tasks
@@ -584,6 +682,7 @@ async function loadAll() {
 
 async function bootstrap() {
   tickerInput.value = state.ticker;
+  priceFieldSelect.value = state.priceField;
   applyTheme(state.theme);
   await loadQuickPicks();
   await loadAll();
