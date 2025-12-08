@@ -459,7 +459,38 @@ def _compute_train_len(length: int, lookback: int) -> int:
     return train_len
 
 
-def predict_prices(ticker: str, days: int, range_key: str | None = None, interval: str | None = None) -> dict:
+def _price_field_label(price_field: str) -> str:
+    labels = {
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+        "current": "Current",
+    }
+    return labels.get(price_field.lower(), "Close")
+
+
+def _select_price_series(df: pd.DataFrame, price_field: str) -> pd.Series:
+    mapping = {
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+        "current": "Close",  # Current price aligns to the latest close in history
+    }
+    col = mapping.get(price_field.lower(), "Close")
+    if col not in df.columns:
+        raise ValueError("Requested price field is not available in the dataset.")
+    return df[col]
+
+
+def predict_prices(
+    ticker: str,
+    days: int,
+    range_key: str | None = None,
+    interval: str | None = None,
+    price_field: str = "close",
+) -> dict:
     # Try requested window/interval first; fall back to full daily history only if nothing returns.
     try:
         df, eff_interval = get_history(ticker, days, range_key=range_key, interval=interval)
@@ -467,19 +498,19 @@ def predict_prices(ticker: str, days: int, range_key: str | None = None, interva
         df, eff_interval = _get_full_history(ticker).reset_index(), "1d"
 
     dates = _format_date_column(df, eff_interval).reset_index(drop=True)
-    close_series = df["Close"].reset_index(drop=True)
-    dataset = close_series.values.astype(np.float32).reshape(-1, 1)
+    price_series = _select_price_series(df, price_field).reset_index(drop=True)
+    dataset = price_series.values.astype(np.float32).reshape(-1, 1)
     using_full_for_training = False
     if len(dataset) < MIN_PRED_POINTS:
         # Train on full history, but return predictions sliced to the requested window.
         df_full = _get_full_history(ticker).reset_index()
         dates_full = _format_date_column(df_full, "1d").reset_index(drop=True)
-        close_series_full = df_full["Close"].reset_index(drop=True)
-        dataset_full = close_series_full.values.astype(np.float32).reshape(-1, 1)
+        price_series_full = _select_price_series(df_full, price_field).reset_index(drop=True)
+        dataset_full = price_series_full.values.astype(np.float32).reshape(-1, 1)
         if len(dataset_full) < MIN_PRED_POINTS:
             raise ValueError("Not enough historical data to build a prediction window yet.")
         dates = dates_full
-        close_series = close_series_full
+        price_series = price_series_full
         dataset = dataset_full
         eff_interval = "1d"
         using_full_for_training = True
@@ -503,16 +534,22 @@ def predict_prices(ticker: str, days: int, range_key: str | None = None, interva
     preds_full = np.array(preds_full).reshape(-1, 1)
     preds_full = scaler.inverse_transform(preds_full)[:, 0]
 
+    # Predict the next unseen point using the most recent lookback window.
+    next_window = scaled_data[-lookback:, :]
+    next_window = np.reshape(next_window, (1, lookback, 1)).astype(np.float32)
+    next_pred = model.predict(next_window, verbose=0)
+    predicted_next_value = float(scaler.inverse_transform(next_pred)[0, 0])
+
     # RMSE on validation portion only.
     val_start = max(training_data_len, lookback)
-    y_true = close_series.iloc[val_start:].to_numpy()
+    y_true = price_series.iloc[val_start:].to_numpy()
     y_hat = preds_full[(val_start - lookback) :]
     rmse = float(np.sqrt(np.mean((y_hat - y_true) ** 2))) if len(y_true) and len(y_hat) else 0.0
 
     valid = pd.DataFrame(
         {
             "Date": dates.iloc[lookback:].reset_index(drop=True),
-            "Close": close_series.iloc[lookback:].reset_index(drop=True),
+            "Actual": price_series.iloc[lookback:].reset_index(drop=True),
             "Prediction": preds_full,
         }
     )
@@ -524,9 +561,15 @@ def predict_prices(ticker: str, days: int, range_key: str | None = None, interva
             tail_len = len(valid)
         valid = valid.tail(tail_len).reset_index(drop=True)
 
-    return {
+    payload = {
         "rmse": rmse,
-        "predicted_next_close": float(preds_full[-1]),
+        "predicted_next_price": predicted_next_value,
         "validation": valid.to_dict(orient="records"),
         "interval": eff_interval,
+        "price_field": price_field.lower(),
+        "price_field_label": _price_field_label(price_field),
     }
+    # Preserve backwards compatibility for consumers still looking for the close-specific key.
+    if price_field.lower() == "close":
+        payload["predicted_next_close"] = predicted_next_value
+    return payload
