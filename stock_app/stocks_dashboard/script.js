@@ -280,7 +280,11 @@ function applyPriceForecast(forecastPoints) {
   const pointBg = labels.map((lbl) => (lbl === finalLabel ? "#f97316" : "rgba(249,115,22,0.12)"));
 
   let forecastDs = priceChart.data.datasets.find((ds) => ds._isForecast);
-  if (!forecastDs) {
+  if (forecastDs) {
+    forecastDs.data = forecastData;
+    forecastDs.pointRadius = pointRadius;
+    forecastDs.pointBackgroundColor = pointBg;
+  } else {
     forecastDs = {
       label: "Forecast",
       data: forecastData,
@@ -294,10 +298,6 @@ function applyPriceForecast(forecastPoints) {
       _isForecast: true,
     };
     priceChart.data.datasets.push(forecastDs);
-  } else {
-    forecastDs.data = forecastData;
-    forecastDs.pointRadius = pointRadius;
-    forecastDs.pointBackgroundColor = pointBg;
   }
 
   base.data = actualData;
@@ -629,7 +629,7 @@ async function loadPrediction(loadToken, ticker, priceField) {
     state.forecastPath = forecastPath;
     const nextPoint =
       forecastPath[0] ||
-      (data.next_point && data.next_point.Date ? data.next_point : null) ||
+      (data.next_point?.Date ? data.next_point : null) ||
       (data.predicted_next_date
         ? { Date: data.predicted_next_date, Prediction: data.predicted_next_price ?? data.predicted_next_close }
         : null);
@@ -642,7 +642,8 @@ async function loadPrediction(loadToken, ticker, priceField) {
       data.predicted_close_price ??
       (forecastPath.length ? forecastPath[forecastPath.length - 1].Prediction : null) ??
       null;
-    document.getElementById("predictionCloseValue").textContent = closeForecast !== null ? formatUSD(closeForecast) : "—";
+    document.getElementById("predictionCloseValue").textContent =
+      closeForecast === null ? "—" : formatUSD(closeForecast);
     document.getElementById("rmseValue").textContent = formatUSD(data.rmse);
     document.getElementById("predActualHeader").textContent = `Actual ${fieldLabel}`;
 
