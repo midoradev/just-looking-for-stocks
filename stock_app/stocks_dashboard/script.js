@@ -7,6 +7,8 @@ const state = {
   showFullPred: false,
   historyData: [],
   validationData: [],
+  forecastPath: [],
+  nextPoint: null,
   theme: "light",
 };
 if (globalThis.ChartZoom) {
@@ -136,7 +138,7 @@ toggleHistoryRowsBtn.addEventListener("click", () => {
 
 togglePredRowsBtn.addEventListener("click", () => {
   state.showFullPred = !state.showFullPred;
-  renderPredTable(state.validationData);
+  renderPredTable(state.validationData, state.forecastPath);
 });
 
 function applyTheme(theme) {
@@ -229,6 +231,78 @@ function pickPrice(row, field) {
   if (key === "low") return row.Low;
   // "current" maps to the latest traded/close price in the history payload
   return row.Close;
+}
+
+function trendClass(current, previous) {
+  if (current === null || current === undefined || previous === null || previous === undefined) return "";
+  if (Number.isNaN(current) || Number.isNaN(previous)) return "";
+  if (current > previous) return "price-up";
+  if (current < previous) return "price-down";
+  return "";
+}
+
+function applyPriceForecast(forecastPoints) {
+  if (!priceChart || !forecastPoints?.length) return;
+  const base = priceChart.data.datasets?.[0];
+  if (!base) return;
+  const originalLabels = [...priceChart.data.labels];
+  const originalData = Array.isArray(base.data) ? [...base.data] : [];
+  const futurePoints = forecastPoints
+    .filter((p) => p?.Date && p?.Prediction !== null && p?.Prediction !== undefined)
+    .map((p) => ({ label: formatDateLabel(state.range, p.Date), value: p.Prediction }));
+  if (!futurePoints.length) return;
+
+  const labels = [...originalLabels];
+  for (const { label } of futurePoints) {
+    if (!labels.includes(label)) {
+      labels.push(label);
+    }
+  }
+  if (labels.length < 2) return;
+
+  const actualData = labels.map((_, idx) => (idx < originalData.length ? originalData[idx] : null));
+  const forecastData = labels.map(() => null);
+  const lastActualIdx = Math.max(0, originalData.length - 1);
+  const lastActualValue = originalData[lastActualIdx];
+  if (lastActualValue !== null && lastActualValue !== undefined) {
+    forecastData[lastActualIdx] = lastActualValue;
+  }
+
+  for (const { label, value } of futurePoints) {
+    const idx = labels.indexOf(label);
+    if (idx >= 0) {
+      forecastData[idx] = value;
+    }
+  }
+
+  const finalLabel = futurePoints[futurePoints.length - 1]?.label;
+  const pointRadius = labels.map((lbl) => (lbl === finalLabel ? 5 : 0));
+  const pointBg = labels.map((lbl) => (lbl === finalLabel ? "#f97316" : "rgba(249,115,22,0.12)"));
+
+  let forecastDs = priceChart.data.datasets.find((ds) => ds._isForecast);
+  if (!forecastDs) {
+    forecastDs = {
+      label: "Forecast",
+      data: forecastData,
+      borderColor: "#f97316",
+      backgroundColor: "rgba(249,115,22,0.12)",
+      borderDash: [6, 4],
+      pointRadius,
+      pointBackgroundColor: pointBg,
+      tension: 0.25,
+      fill: false,
+      _isForecast: true,
+    };
+    priceChart.data.datasets.push(forecastDs);
+  } else {
+    forecastDs.data = forecastData;
+    forecastDs.pointRadius = pointRadius;
+    forecastDs.pointBackgroundColor = pointBg;
+  }
+
+  base.data = actualData;
+  priceChart.data.labels = labels;
+  priceChart.update();
 }
 
 function zoomOptions(canvas) {
@@ -399,9 +473,14 @@ function renderHistoryTable(data) {
   const tbody = document.querySelector("#historyTable tbody");
   tbody.innerHTML = "";
   const rows = state.showFullHistory ? data : data.slice(-10);
-  for (const p of rows) {
+  const startIdx = state.showFullHistory ? 0 : Math.max(0, data.length - rows.length);
+  for (let i = 0; i < rows.length; i += 1) {
+    const p = rows[i];
+    const prev = data[startIdx + i - 1] || null;
+    const cls = trendClass(p.Close, prev?.Close);
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${p.Date}</td><td>${p.Open}</td><td>${p.High}</td><td>${p.Low}</td><td>${p.Close}</td><td>${p.Volume}</td>`;
+    tr.innerHTML = `<td>${p.Date}</td><td>${p.Open}</td><td>${p.High}</td><td>${p.Low}</td><td class="${cls}">${p.Close}</td><td>${p.Volume}</td>`;
+    if (cls) tr.classList.add(cls);
     tbody.appendChild(tr);
   }
   const meta = document.getElementById("historyRowsMeta");
@@ -478,6 +557,7 @@ async function loadHistory(loadToken, ticker, range, interval, priceField) {
       if (priceChart) priceChart.resetZoom();
       setCursor(priceCanvas, "grab");
     };
+    applyPriceForecast(state.forecastPath);
     hideChartLoader("price");
   } catch (err) {
     if (loadToken === activeLoadToken) {
@@ -487,17 +567,40 @@ async function loadHistory(loadToken, ticker, range, interval, priceField) {
   }
 }
 
-function renderPredTable(validation) {
+function renderPredTable(validation, forecastPath) {
   const tbody = document.querySelector("#predTable tbody");
   tbody.innerHTML = "";
-  const tableRows = [...validation]
-    .map((row) => ({ ...row, _dateObj: new Date(row.Date), _raw: row.Date }))
-    .sort((a, b) => b._dateObj - a._dateObj);
+  const baseRows = [...validation].map((row) => {
+    const parsed = new Date(row.Date);
+    return { ...row, _dateObj: parsed, _raw: row.Date, _isFuture: false, _isFinal: false };
+  });
+  const futureRows = (forecastPath || []).map((row, idx, arr) => {
+    const parsed = new Date(row.Date);
+    return {
+      Date: row.Date,
+      Prediction: row.Prediction,
+      Actual: null,
+      _dateObj: Number.isNaN(parsed?.getTime?.()) ? new Date(Date.now()) : parsed,
+      _raw: row.Date,
+      _isFuture: true,
+      _isFinal: idx === arr.length - 1,
+    };
+  });
+  const tableRows = [...futureRows, ...baseRows].sort((a, b) => b._dateObj - a._dateObj);
   const rows = state.showFullPred ? tableRows : tableRows.slice(0, 10);
+  let prevActual = null;
+  let prevPred = null;
   for (const row of rows) {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${formatDateLabel(state.range, row._raw)}</td><td>${formatUSD(row.Actual)}</td><td>${formatUSD(row.Prediction)}</td>`;
+    if (row._isFuture) tr.classList.add(row._isFinal ? "future-row-final" : "future-row");
+    const actual = row.Actual === null || row.Actual === undefined ? "—" : formatUSD(row.Actual);
+    const prediction = row.Prediction === null || row.Prediction === undefined ? "—" : formatUSD(row.Prediction);
+    const actualCls = trendClass(row.Actual, prevActual);
+    const predCls = trendClass(row.Prediction, prevPred);
+    tr.innerHTML = `<td>${formatDateLabel(state.range, row._raw)}</td><td class="${actualCls}">${actual}</td><td class="${predCls}">${prediction}</td>`;
     tbody.appendChild(tr);
+    prevActual = row.Actual !== null && row.Actual !== undefined ? row.Actual : prevActual;
+    prevPred = row.Prediction !== null && row.Prediction !== undefined ? row.Prediction : prevPred;
   }
   const meta = document.getElementById("predRowsMeta");
   const btn = document.getElementById("togglePredRows");
@@ -522,23 +625,50 @@ async function loadPrediction(loadToken, ticker, priceField) {
     const data = await fetchJSON(`/api/predict?${query.toString()}`);
     if (loadToken !== activeLoadToken) return;
     const fieldLabel = data.price_field_label || priceFieldLabel(priceField);
+    const forecastPath = Array.isArray(data.forecast_path) ? data.forecast_path : [];
+    state.forecastPath = forecastPath;
+    const nextPoint =
+      forecastPath[0] ||
+      (data.next_point && data.next_point.Date ? data.next_point : null) ||
+      (data.predicted_next_date
+        ? { Date: data.predicted_next_date, Prediction: data.predicted_next_price ?? data.predicted_next_close }
+        : null);
+    state.nextPoint = nextPoint;
     document.getElementById("predictionLabel").textContent = `Next predicted ${fieldLabel.toLowerCase()}`;
     document.getElementById("predictionValue").textContent = formatUSD(data.predicted_next_price ?? data.predicted_next_close);
+    const whenLabel = nextPoint?.Date ? formatDateLabel(state.range, nextPoint.Date) : "—";
+    document.getElementById("predictionTime").textContent = nextPoint ? `${whenLabel} (${data.interval || state.interval})` : "—";
+    const closeForecast =
+      data.predicted_close_price ??
+      (forecastPath.length ? forecastPath[forecastPath.length - 1].Prediction : null) ??
+      null;
+    document.getElementById("predictionCloseValue").textContent = closeForecast !== null ? formatUSD(closeForecast) : "—";
     document.getElementById("rmseValue").textContent = formatUSD(data.rmse);
     document.getElementById("predActualHeader").textContent = `Actual ${fieldLabel}`;
 
     const validation = data.validation || [];
     state.validationData = validation;
-    renderPredTable(validation);
+    renderPredTable(validation, forecastPath);
+    applyPriceForecast(forecastPath);
 
     // Build prediction chart
     const labels = validation.map((d) => formatDateLabel(state.range, d.Date));
     const actual = validation.map((d) => d.Actual);
     const preds = validation.map((d) => d.Prediction);
+    if (forecastPath?.length) {
+      for (const pt of forecastPath) {
+        labels.push(formatDateLabel(state.range, pt.Date));
+        actual.push(null);
+        preds.push(pt.Prediction ?? null);
+      }
+    }
+    const finalIdx = forecastPath?.length ? labels.length - 1 : -1;
     if (predChart) predChart.destroy();
     const predCanvas = document.getElementById("predChart");
     const ctx = predCanvas.getContext("2d");
     const zoomOpts = zoomOptions(predCanvas);
+    const pointRadius = preds.map((_, idx) => (idx === finalIdx && forecastPath?.length ? 4 : 0));
+    const pointBg = preds.map((_, idx) => (idx === finalIdx && forecastPath?.length ? "#e11d48" : "rgba(244,161,30,0.12)"));
     predChart = new Chart(ctx, {
       type: "line",
       data: {
@@ -560,7 +690,8 @@ async function loadPrediction(loadToken, ticker, priceField) {
             borderColor: "#f4a11e",
             backgroundColor: "rgba(244,161,30,0.12)",
             borderWidth: 2,
-            pointRadius: 0,
+            pointRadius,
+            pointBackgroundColor: pointBg,
             tension: 0.25,
             fill: true,
           },
@@ -661,9 +792,13 @@ async function loadAll() {
   document.querySelector("#predTable tbody").innerHTML = "";
   document.getElementById("priceMeta").textContent = "Loading...";
   document.getElementById("predictionValue").textContent = "—";
+  document.getElementById("predictionTime").textContent = "—";
+  document.getElementById("predictionCloseValue").textContent = "—";
   document.getElementById("rmseValue").textContent = "—";
   state.historyData = [];
   state.validationData = [];
+  state.forecastPath = [];
+  state.nextPoint = null;
   setError("");
   const tasks = [
     { name: "Info", run: () => loadInfo(loadToken, state.ticker) },

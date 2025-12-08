@@ -96,6 +96,17 @@ th, td {
   text-align: left;
 }
 th { background: var(--panel-muted); color: var(--text); }
+.future-row td {
+  background: linear-gradient(120deg, rgba(0, 82, 204, 0.08), rgba(0, 143, 93, 0.06));
+  font-weight: 700;
+}
+.future-row-final td {
+  background: linear-gradient(120deg, rgba(249, 115, 22, 0.12), rgba(0, 143, 93, 0.08));
+  font-weight: 700;
+  border-top: 2px dashed rgba(249, 115, 22, 0.6);
+}
+.price-up { color: #0ea15c; font-weight: 700; }
+.price-down { color: #d32f2f; font-weight: 700; }
 .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
 .error { color: var(--danger); margin-top: 6px; font-size: 14px; }
 .chart-area { background: var(--chart-bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-top: 10px; }

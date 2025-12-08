@@ -3,6 +3,7 @@ from pathlib import Path
 from difflib import get_close_matches
 import re
 import time
+import math
 from urllib.parse import urlencode
 from collections import OrderedDict
 import gc
@@ -439,6 +440,98 @@ def _format_date_column(df: pd.DataFrame, interval: str) -> pd.Series:
     return pd.to_datetime(col).dt.strftime("%Y-%m-%d")
 
 
+def _next_timestamp_label(last_label: str, interval: str) -> str:
+    """Return the next timestamp label in the same format as the input label."""
+    try:
+        ts = pd.to_datetime(last_label)
+    except Exception:
+        return last_label
+    if pd.isna(ts):
+        return last_label
+    step_map = {
+        "1m": pd.Timedelta(minutes=1),
+        "2m": pd.Timedelta(minutes=2),
+        "5m": pd.Timedelta(minutes=5),
+        "15m": pd.Timedelta(minutes=15),
+        "30m": pd.Timedelta(minutes=30),
+        "1h": pd.Timedelta(hours=1),
+        "1d": pd.Timedelta(days=1),
+        "5d": pd.Timedelta(days=5),
+        "1wk": pd.Timedelta(weeks=1),
+        "1mo": pd.DateOffset(months=1),
+        "3mo": pd.DateOffset(months=3),
+    }
+    step = step_map.get(interval, pd.Timedelta(days=1))
+    try:
+        next_ts = ts + step
+    except Exception:
+        next_ts = ts
+    has_time = ":" in str(last_label) or interval in {"1m", "2m", "5m", "15m", "30m", "1h"}
+    fmt = "%Y-%m-%d %H:%M" if has_time else "%Y-%m-%d"
+    return next_ts.strftime(fmt)
+
+
+def _interval_step_delta(interval: str):
+    step_map = {
+        "1m": pd.Timedelta(minutes=1),
+        "2m": pd.Timedelta(minutes=2),
+        "5m": pd.Timedelta(minutes=5),
+        "15m": pd.Timedelta(minutes=15),
+        "30m": pd.Timedelta(minutes=30),
+        "1h": pd.Timedelta(hours=1),
+        "1d": pd.Timedelta(days=1),
+        "5d": pd.Timedelta(days=5),
+        "1wk": pd.Timedelta(weeks=1),
+        "1mo": pd.DateOffset(months=1),
+        "3mo": pd.DateOffset(months=3),
+    }
+    return step_map.get(interval, pd.Timedelta(days=1))
+
+
+def _compute_horizon_steps(last_label: str, interval: str) -> int:
+    """Return how many future steps to forecast to reach session close for intraday."""
+    try:
+        ts = pd.to_datetime(last_label)
+    except Exception:
+        return 5
+    if pd.isna(ts):
+        return 5
+    intraday = {"1m", "2m", "5m", "15m", "30m", "1h"}
+    if interval not in intraday:
+        return 5
+    close_ts = ts.normalize() + pd.Timedelta(hours=16)
+    if ts >= close_ts:
+        return 5
+    remaining_minutes = (close_ts - ts).total_seconds() / 60
+    step = _interval_step_delta(interval)
+    if isinstance(step, pd.Timedelta):
+        step_minutes = step / pd.Timedelta(minutes=1)
+    elif isinstance(step, pd.DateOffset):
+        # DateOffset isn't expected for intraday, but fall back to its n value if present.
+        step_minutes = (step.n or 1) * 24 * 60
+    else:
+        step_minutes = 60
+    if not step_minutes or step_minutes <= 0:
+        return 5
+    steps = math.ceil(remaining_minutes / step_minutes)
+    return max(3, min(int(steps), 600))  # cap to avoid runaway while covering a full session
+
+
+def _multi_step_forecast(
+    scaled_data: np.ndarray, model: Sequential, scaler: MinMaxScaler, lookback: int, steps: int
+) -> list[float]:
+    """Iteratively forecast multiple steps ahead from the last lookback window."""
+    window = scaled_data[-lookback:, :].copy()
+    forecasts: list[float] = []
+    for _ in range(steps):
+        pred_scaled = model.predict(np.reshape(window, (1, lookback, 1)).astype(np.float32), verbose=0)
+        pred_val = float(scaler.inverse_transform(pred_scaled)[0, 0])
+        forecasts.append(pred_val)
+        # slide the window forward with the predicted scaled value
+        window = np.vstack([window[1:], pred_scaled.reshape(1, 1)])
+    return forecasts
+
+
 def _choose_lookback(length: int) -> int:
     if length >= 100:
         return 60
@@ -534,11 +627,28 @@ def predict_prices(
     preds_full = np.array(preds_full).reshape(-1, 1)
     preds_full = scaler.inverse_transform(preds_full)[:, 0]
 
-    # Predict the next unseen point using the most recent lookback window.
-    next_window = scaled_data[-lookback:, :]
-    next_window = np.reshape(next_window, (1, lookback, 1)).astype(np.float32)
-    next_pred = model.predict(next_window, verbose=0)
-    predicted_next_value = float(scaler.inverse_transform(next_pred)[0, 0])
+    # Bias-correct predictions so they stay anchored to the latest observed price.
+    last_actual = float(price_series.iloc[-1])
+    last_pred = float(preds_full[-1])
+    bias = last_actual - last_pred
+    preds_full = preds_full + bias
+
+    horizon = _compute_horizon_steps(str(dates.iloc[-1]), eff_interval)
+    raw_forecasts = _multi_step_forecast(scaled_data, model, scaler, lookback, max(1, horizon))
+    forecast_values = [float(v + bias) for v in raw_forecasts]
+    forecast_labels = []
+    label_cursor = str(dates.iloc[-1])
+    for _ in forecast_values:
+        label_cursor = _next_timestamp_label(label_cursor, eff_interval)
+        forecast_labels.append(label_cursor)
+
+    predicted_next_value = float(forecast_values[0])
+    next_date_label = forecast_labels[0] if forecast_labels else _next_timestamp_label(str(dates.iloc[-1]), eff_interval)
+    predicted_close_value = float(forecast_values[-1])
+    forecast_path = [
+        {"Date": forecast_labels[i], "Prediction": float(forecast_values[i])}
+        for i in range(len(forecast_values))
+    ]
 
     # RMSE on validation portion only.
     val_start = max(training_data_len, lookback)
@@ -564,6 +674,10 @@ def predict_prices(
     payload = {
         "rmse": rmse,
         "predicted_next_price": predicted_next_value,
+        "predicted_next_date": next_date_label,
+        "predicted_close_price": predicted_close_value,
+        "next_point": {"Date": next_date_label, "Prediction": predicted_next_value},
+        "forecast_path": forecast_path,
         "validation": valid.to_dict(orient="records"),
         "interval": eff_interval,
         "price_field": price_field.lower(),
